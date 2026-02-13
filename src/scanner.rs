@@ -1,3 +1,4 @@
+use crate::lang::{Lang, T};
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -325,29 +326,28 @@ pub fn generate_markdown(
     changes: &Changes,
     new_snapshot: &Snapshot,
     old_snapshot: Option<&Snapshot>,
+    lang: Lang,
 ) -> String {
     let mut lines = Vec::new();
 
-    lines.push(format!("# 🛠️ {} — Přehled změn\n", display_name));
+    lines.push(T::md_heading(lang, display_name));
     lines.push(format!(
-        "**Datum:** {}\n",
+        "**{}:** {}\n",
+        T::md_date(lang),
         chrono::Local::now().format("%d.%m.%Y %H:%M")
     ));
 
     let stats = &new_snapshot.stats;
-    lines.push(format!(
-        "**Celkem modů:** {}  •  Vypnuté: {}  •  Chyby čtení: {}\n",
-        stats.active, stats.disabled, stats.failed
-    ));
+    lines.push(T::md_total_mods(lang, stats.active, stats.disabled, stats.failed));
 
     if let Some(old) = old_snapshot {
-        lines.push(format!("**Porovnáno s:** {}\n", old.timestamp));
+        lines.push(format!("**{}:** {}\n", T::md_compared_with(lang), old.timestamp));
     }
 
     lines.push("\n---\n".to_string());
 
     if !changes.added.is_empty() {
-        lines.push(format!("## ✨ Nové módy ({})", changes.added.len()));
+        lines.push(T::md_new_mods(lang, changes.added.len()));
         let mut sorted = changes.added.clone();
         sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         for m in &sorted {
@@ -357,26 +357,17 @@ pub fn generate_markdown(
     }
 
     if !changes.updated.is_empty() {
-        lines.push(format!(
-            "## 🔄 Aktualizované módy ({})",
-            changes.updated.len()
-        ));
+        lines.push(T::md_updated_mods(lang, changes.updated.len()));
         let mut sorted = changes.updated.clone();
         sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         for m in &sorted {
-            lines.push(format!(
-                "* `{}` → **{}** (předtím {})",
-                m.name, m.new_version, m.old_version
-            ));
+            lines.push(T::md_updated_detail(lang, &m.name, &m.new_version, &m.old_version));
         }
         lines.push(String::new());
     }
 
     if !changes.removed.is_empty() {
-        lines.push(format!(
-            "## ❌ Odstraněné módy ({})",
-            changes.removed.len()
-        ));
+        lines.push(T::md_removed_mods(lang, changes.removed.len()));
         let mut sorted = changes.removed.clone();
         sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         for m in &sorted {
@@ -386,13 +377,8 @@ pub fn generate_markdown(
     }
 
     if !changes.newly_disabled.is_empty() {
-        lines.push(format!(
-            "## 🚫 Nově vypnuté módy ({})",
-            changes.newly_disabled.len()
-        ));
-        lines.push(
-            "*Důvod: Pravděpodobně nekompatibilní nebo konfliktní s aktuální verzí*\n".to_string(),
-        );
+        lines.push(T::md_newly_disabled(lang, changes.newly_disabled.len()));
+        lines.push(T::md_disabled_reason(lang).to_string());
         let mut sorted = changes.newly_disabled.clone();
         sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         for m in &sorted {
@@ -402,10 +388,7 @@ pub fn generate_markdown(
     }
 
     if !changes.newly_enabled.is_empty() {
-        lines.push(format!(
-            "## ✅ Nově zapnuté módy ({})",
-            changes.newly_enabled.len()
-        ));
+        lines.push(T::md_newly_enabled(lang, changes.newly_enabled.len()));
         let mut sorted = changes.newly_enabled.clone();
         sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         for m in &sorted {
@@ -416,10 +399,7 @@ pub fn generate_markdown(
 
     if !new_snapshot.disabled.is_empty() {
         lines.push("---\n".to_string());
-        lines.push(format!(
-            "## 📋 Aktuálně vypnuté módy ({})",
-            new_snapshot.disabled.len()
-        ));
+        lines.push(T::md_currently_disabled(lang, new_snapshot.disabled.len()));
         let mut sorted = new_snapshot.disabled.clone();
         sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
         for m in &sorted {
@@ -430,25 +410,18 @@ pub fn generate_markdown(
 
     if !new_snapshot.failed.is_empty() {
         lines.push("---\n".to_string());
-        lines.push(format!(
-            "## ⚠️ Soubory s chybou čtení ({})",
-            new_snapshot.failed.len()
-        ));
+        lines.push(T::md_read_errors(lang, new_snapshot.failed.len()));
         let mut sorted = new_snapshot.failed.clone();
         sorted.sort();
         for f in &sorted {
-            lines.push(format!("* `{}` — nelze přečíst metadata", f));
+            lines.push(T::md_read_error_detail(lang, f));
         }
         lines.push(String::new());
     }
 
     lines.push("---\n".to_string());
-    lines.push("🎮 **Doporučení:** Po větších updatech může pomoct smazat `config/` (nebo aspoň konkrétní configy problematických modů).\n".to_string());
-    lines.push(format!(
-        "_(Beze změny: {} • Celkem změn: {})_\n",
-        changes.unchanged.len(),
-        changes.total_changes()
-    ));
+    lines.push(T::md_recommendation(lang).to_string());
+    lines.push(T::md_summary(lang, changes.unchanged.len(), changes.total_changes()));
 
     lines.join("\n")
 }

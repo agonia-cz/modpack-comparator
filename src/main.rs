@@ -1,8 +1,10 @@
 #![windows_subsystem = "windows"]
 
+mod lang;
 mod scanner;
 
 use eframe::egui;
+use lang::{Lang, T};
 use scanner::{
     build_display_name, build_file_prefix, compare_snapshots, generate_markdown,
     scan_mods_directory, Changes, Snapshot,
@@ -38,7 +40,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Porovnávač Modů",
+        "Modpack Comparator",
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
@@ -53,15 +55,13 @@ fn main() -> eframe::Result<()> {
 
 #[derive(Clone)]
 struct ModrinthProfile {
+    #[allow(dead_code)]
     folder_name: String,
     display_name: String,
     mods_path: PathBuf,
     jar_count: usize,
 }
 
-/// Load user-defined aliases from aliases.json in the Modrinth profiles directory.
-/// Path: `%APPDATA%/ModrinthApp/profiles/aliases.json`
-/// Format: `{ "Agonia.cz (3)": "Agonia Lite", "Agonia.cz (2)": "Agonia Full" }`
 fn load_aliases() -> HashMap<String, String> {
     let appdata = match std::env::var_os("APPDATA") {
         Some(a) => PathBuf::from(a),
@@ -74,7 +74,6 @@ fn load_aliases() -> HashMap<String, String> {
         .join("aliases.json");
 
     if !path.exists() {
-        // Create default aliases.json with known profiles
         let defaults: HashMap<&str, &str> = [
             ("Agonia.cz (3)", "Agonia Lite"),
             ("Agonia.cz (2)", "Agonia Full"),
@@ -173,7 +172,6 @@ fn find_snapshot_history(profile_dir: &PathBuf) -> Vec<SnapshotEntry> {
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".mods_snapshot.json") {
-                // Try to read timestamp from file
                 let timestamp = std::fs::read_to_string(entry.path())
                     .ok()
                     .and_then(|txt| serde_json::from_str::<Snapshot>(&txt).ok())
@@ -219,22 +217,16 @@ enum Tab {
 }
 
 struct App {
-    // Settings
+    lang: Lang,
     mods_dir: String,
     base_name: String,
     edition_index: usize,
     pack_version: String,
     force_new: bool,
-
-    // Profiles
     profiles: Vec<ModrinthProfile>,
     selected_profile: Option<usize>,
-
-    // Async scan
     scan_rx: Option<mpsc::Receiver<ScanResult>>,
     scanning: bool,
-
-    // State
     tab: Tab,
     snapshot: Option<Snapshot>,
     old_snapshot: Option<Snapshot>,
@@ -242,8 +234,6 @@ struct App {
     markdown: String,
     status: String,
     scan_done: bool,
-
-    // History
     history: Vec<SnapshotEntry>,
     history_selected_a: Option<usize>,
     history_selected_b: Option<usize>,
@@ -256,17 +246,15 @@ const EDITIONS: [&str; 2] = ["Full", "Lite"];
 impl App {
     fn new() -> Self {
         let profiles = detect_modrinth_profiles();
-
-        // Auto-select first Agonia profile
         let selected = profiles
             .iter()
             .position(|p| p.display_name.contains("Agonia"));
-
         let mods_dir = selected
             .map(|i| profiles[i].mods_path.to_string_lossy().to_string())
             .unwrap_or_default();
 
         Self {
+            lang: Lang::Cs,
             mods_dir,
             base_name: "Agonia".to_string(),
             edition_index: 0,
@@ -299,21 +287,25 @@ impl App {
         let p = PathBuf::from(&self.mods_dir);
         p.parent().map(|p| p.to_path_buf())
     }
+
+    fn l(&self) -> Lang {
+        self.lang
+    }
 }
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Check for async scan result
+        let l = self.l();
+
         if let Some(rx) = &self.scan_rx {
             if let Ok(result) = rx.try_recv() {
-                // Save files
                 if let Ok(json) = serde_json::to_string_pretty(&result.snapshot) {
                     let _ = std::fs::write(&result.snapshot_path, &json);
                 }
                 let _ = std::fs::write(&result.md_path, &result.markdown);
 
-                self.status = format!(
-                    "Hotovo! {} aktivních, {} vypnutých, {} chyb, {} změn",
+                self.status = T::scan_done(
+                    l,
                     result.snapshot.stats.active,
                     result.snapshot.stats.disabled,
                     result.snapshot.stats.failed,
@@ -329,41 +321,36 @@ impl eframe::App for App {
                 self.scan_rx = None;
                 self.tab = Tab::Results;
 
-                // Refresh history
                 if let Some(dir) = self.profile_dir() {
                     self.history = find_snapshot_history(&dir);
                 }
             }
         }
 
-        // Request repaint while scanning
         if self.scanning {
             ctx.request_repaint();
         }
 
-        // Top tabs
         egui::TopBottomPanel::top("tabs").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut self.tab, Tab::Settings, "Nastavení");
-                ui.selectable_value(&mut self.tab, Tab::Results, "Výsledky");
-                ui.selectable_value(&mut self.tab, Tab::Markdown, "Markdown");
-                ui.selectable_value(&mut self.tab, Tab::History, "Historie");
+                ui.selectable_value(&mut self.tab, Tab::Settings, T::tab_settings(l));
+                ui.selectable_value(&mut self.tab, Tab::Results, T::tab_results(l));
+                ui.selectable_value(&mut self.tab, Tab::Markdown, T::tab_markdown(l));
+                ui.selectable_value(&mut self.tab, Tab::History, T::tab_history(l));
             });
         });
 
-        // Status bar
         egui::TopBottomPanel::bottom("status_bar").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if self.scanning {
                     ui.spinner();
-                    ui.label("Skenuji módy...");
+                    ui.label(T::scanning(l));
                 } else if !self.status.is_empty() {
                     ui.label(&self.status);
                 }
             });
         });
 
-        // Central panel
         egui::CentralPanel::default().show(ctx, |ui| match self.tab {
             Tab::Settings => self.show_settings(ui),
             Tab::Results => self.show_results(ui),
@@ -375,29 +362,43 @@ impl eframe::App for App {
 
 impl App {
     fn show_settings(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Nastavení skenování");
-        ui.add_space(12.0);
+        let l = self.l();
 
-        // Profile selector
+        ui.heading(T::settings_heading(l));
+        ui.add_space(4.0);
+
+        // Language selector
+        ui.horizontal(|ui| {
+            ui.label(T::language_label(l));
+            egui::ComboBox::from_id_salt("lang_select")
+                .selected_text(self.lang.label())
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut self.lang, Lang::Cs, Lang::Cs.label());
+                    ui.selectable_value(&mut self.lang, Lang::En, Lang::En.label());
+                });
+        });
+
+        ui.add_space(8.0);
+
         if !self.profiles.is_empty() {
             ui.horizontal(|ui| {
-                ui.label("Modrinth profil:");
+                ui.label(T::profile_label(l));
                 let current_label = self
                     .selected_profile
                     .map(|i| {
                         format!(
-                            "{} ({} JARů)",
+                            "{} ({} JARs)",
                             self.profiles[i].display_name, self.profiles[i].jar_count
                         )
                     })
-                    .unwrap_or_else(|| "Vlastní cesta".to_string());
+                    .unwrap_or_else(|| T::custom_path(l).to_string());
 
                 egui::ComboBox::from_id_salt("profile_select")
                     .selected_text(&current_label)
                     .show_ui(ui, |ui| {
                         for (i, profile) in self.profiles.iter().enumerate() {
                             let label =
-                                format!("{} ({} JARů)", profile.display_name, profile.jar_count);
+                                format!("{} ({} JARs)", profile.display_name, profile.jar_count);
                             if ui
                                 .selectable_value(&mut self.selected_profile, Some(i), &label)
                                 .clicked()
@@ -407,27 +408,20 @@ impl App {
                             }
                         }
                         if ui
-                            .selectable_value(
-                                &mut self.selected_profile,
-                                None,
-                                "Vlastní cesta",
-                            )
+                            .selectable_value(&mut self.selected_profile, None, T::custom_path(l))
                             .clicked()
-                        {
-                            // Keep current mods_dir
-                        }
+                        {}
                     });
             });
             ui.add_space(4.0);
         }
 
-        // Mods directory
         ui.horizontal(|ui| {
-            ui.label("Složka s módy:");
+            ui.label(T::mods_dir_label(l));
             ui.add(egui::TextEdit::singleline(&mut self.mods_dir).desired_width(400.0));
-            if ui.button("Procházet...").clicked() {
+            if ui.button(T::browse(l)).clicked() {
                 if let Some(path) = rfd::FileDialog::new()
-                    .set_title("Vyber složku s módy")
+                    .set_title(T::browse_title(l))
                     .pick_folder()
                 {
                     self.mods_dir = path.to_string_lossy().to_string();
@@ -444,11 +438,11 @@ impl App {
             .num_columns(2)
             .spacing([12.0, 8.0])
             .show(ui, |ui| {
-                ui.label("Název packu:");
+                ui.label(T::pack_name_label(l));
                 ui.text_edit_singleline(&mut self.base_name);
                 ui.end_row();
 
-                ui.label("Edice:");
+                ui.label(T::edition_label(l));
                 egui::ComboBox::from_id_salt("edition")
                     .selected_text(self.edition())
                     .show_ui(ui, |ui| {
@@ -458,25 +452,21 @@ impl App {
                     });
                 ui.end_row();
 
-                ui.label("Verze packu:");
+                ui.label(T::pack_version_label(l));
                 ui.text_edit_singleline(&mut self.pack_version);
                 ui.end_row();
             });
 
         ui.add_space(8.0);
-        ui.checkbox(
-            &mut self.force_new,
-            "Vytvořit nový snapshot bez porovnání",
-        );
+        ui.checkbox(&mut self.force_new, T::force_new(l));
 
         ui.add_space(16.0);
         ui.separator();
         ui.add_space(8.0);
 
-        // Preview
         let prefix = build_file_prefix(&self.base_name, self.edition(), &self.pack_version);
         let display = build_display_name(&self.base_name, self.edition(), &self.pack_version);
-        ui.label(format!("Název: {}", display));
+        ui.label(format!("{}: {}", T::name_preview(l), display));
         ui.label(format!("Snapshot: {}.mods_snapshot.json", prefix));
         ui.label(format!("Changelog: {}.changelog.md", prefix));
 
@@ -487,7 +477,7 @@ impl App {
 
         ui.add_enabled_ui(dir_exists && !self.scanning, |ui| {
             if ui
-                .button(egui::RichText::new("Skenovat a porovnat").size(18.0))
+                .button(egui::RichText::new(T::scan_button(l)).size(18.0))
                 .clicked()
             {
                 self.start_scan();
@@ -497,12 +487,12 @@ impl App {
         if self.scanning {
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label("Skenování probíhá...");
+                ui.label(T::scanning_in_progress(l));
             });
         }
 
         if !dir_exists && !self.mods_dir.is_empty() {
-            ui.colored_label(egui::Color32::RED, "Složka neexistuje!");
+            ui.colored_label(egui::Color32::RED, T::dir_not_found(l));
         }
     }
 
@@ -512,11 +502,12 @@ impl App {
         let base_name = self.base_name.clone();
         let pack_version = self.pack_version.clone();
         let force_new = self.force_new;
+        let lang = self.lang;
 
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
         self.scanning = true;
-        self.status = "Skenuji módy...".to_string();
+        self.status = T::scanning(self.l()).to_string();
 
         thread::spawn(move || {
             let prefix = build_file_prefix(&base_name, &edition, &pack_version);
@@ -526,10 +517,8 @@ impl App {
             let snapshot_path = snapshot_dir.join(format!("{}.mods_snapshot.json", prefix));
             let md_path = snapshot_dir.join(format!("{}.changelog.md", prefix));
 
-            // Scan
             let new_snapshot = scan_mods_directory(&mods_path);
 
-            // Load old snapshot
             let old_snapshot = if snapshot_path.exists() && !force_new {
                 std::fs::read_to_string(&snapshot_path)
                     .ok()
@@ -538,7 +527,6 @@ impl App {
                 None
             };
 
-            // Compare
             let changes = if let Some(ref old) = old_snapshot {
                 compare_snapshots(old, &new_snapshot)
             } else {
@@ -548,9 +536,13 @@ impl App {
                 }
             };
 
-            // Generate markdown
-            let markdown =
-                generate_markdown(&display_name, &changes, &new_snapshot, old_snapshot.as_ref());
+            let markdown = generate_markdown(
+                &display_name,
+                &changes,
+                &new_snapshot,
+                old_snapshot.as_ref(),
+                lang,
+            );
 
             let _ = tx.send(ScanResult {
                 snapshot: new_snapshot,
@@ -564,32 +556,34 @@ impl App {
     }
 
     fn show_results(&mut self, ui: &mut egui::Ui) {
+        let l = self.l();
+
         if !self.scan_done {
-            ui.heading("Žádné výsledky");
-            ui.label("Nejdřív spusť skenování v záložce Nastavení.");
+            ui.heading(T::no_results(l));
+            ui.label(T::run_scan_first(l));
             return;
         }
 
         let snapshot = self.snapshot.as_ref().unwrap();
         let changes = self.changes.as_ref().unwrap();
 
-        ui.heading("Výsledky skenování");
+        ui.heading(T::results_heading(l));
         ui.add_space(8.0);
 
         egui::Grid::new("stats_grid")
             .num_columns(2)
             .spacing([16.0, 4.0])
             .show(ui, |ui| {
-                ui.label("Celkem JARů:");
+                ui.label(T::total_jars(l));
                 ui.strong(snapshot.stats.total.to_string());
                 ui.end_row();
-                ui.label("Aktivní:");
+                ui.label(T::active(l));
                 ui.strong(snapshot.stats.active.to_string());
                 ui.end_row();
-                ui.label("Vypnuté:");
+                ui.label(T::disabled(l));
                 ui.strong(snapshot.stats.disabled.to_string());
                 ui.end_row();
-                ui.label("Chyby čtení:");
+                ui.label(T::read_errors(l));
                 ui.strong(snapshot.stats.failed.to_string());
                 ui.end_row();
             });
@@ -598,112 +592,88 @@ impl App {
         ui.separator();
         ui.add_space(8.0);
 
-        ui.heading("Změny");
+        ui.heading(T::changes_heading(l));
         ui.add_space(4.0);
 
-        Self::show_changes_list(ui, changes, self.old_snapshot.is_some());
+        Self::show_changes_list(ui, changes, self.old_snapshot.is_some(), l);
     }
 
-    fn show_changes_list(ui: &mut egui::Ui, changes: &Changes, has_old: bool) {
+    fn show_changes_list(ui: &mut egui::Ui, changes: &Changes, has_old: bool, l: Lang) {
         egui::ScrollArea::vertical().show(ui, |ui| {
             if !changes.added.is_empty() {
-                ui.collapsing(
-                    format!("✨ Nové módy ({})", changes.added.len()),
-                    |ui| {
-                        let mut sorted = changes.added.clone();
-                        sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                        for m in &sorted {
-                            ui.label(format!("  {} v{}", m.name, m.version));
-                        }
-                    },
-                );
+                ui.collapsing(T::added(l, changes.added.len()), |ui| {
+                    let mut sorted = changes.added.clone();
+                    sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    for m in &sorted {
+                        ui.label(format!("  {} v{}", m.name, m.version));
+                    }
+                });
             }
 
             if !changes.updated.is_empty() {
-                ui.collapsing(
-                    format!("🔄 Aktualizované ({})", changes.updated.len()),
-                    |ui| {
-                        let mut sorted = changes.updated.clone();
-                        sorted
-                            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                        for m in &sorted {
-                            ui.label(format!(
-                                "  {} → {} (předtím {})",
-                                m.name, m.new_version, m.old_version
-                            ));
-                        }
-                    },
-                );
+                ui.collapsing(T::updated(l, changes.updated.len()), |ui| {
+                    let mut sorted = changes.updated.clone();
+                    sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    for m in &sorted {
+                        ui.label(T::updated_detail(l, &m.name, &m.new_version, &m.old_version));
+                    }
+                });
             }
 
             if !changes.removed.is_empty() {
-                ui.collapsing(
-                    format!("❌ Odstraněné ({})", changes.removed.len()),
-                    |ui| {
-                        let mut sorted = changes.removed.clone();
-                        sorted
-                            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                        for m in &sorted {
-                            ui.label(format!("  {} v{}", m.name, m.version));
-                        }
-                    },
-                );
+                ui.collapsing(T::removed(l, changes.removed.len()), |ui| {
+                    let mut sorted = changes.removed.clone();
+                    sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    for m in &sorted {
+                        ui.label(format!("  {} v{}", m.name, m.version));
+                    }
+                });
             }
 
             if !changes.newly_disabled.is_empty() {
-                ui.collapsing(
-                    format!("🚫 Nově vypnuté ({})", changes.newly_disabled.len()),
-                    |ui| {
-                        let mut sorted = changes.newly_disabled.clone();
-                        sorted
-                            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                        for m in &sorted {
-                            ui.label(format!("  {} v{}", m.name, m.version));
-                        }
-                    },
-                );
+                ui.collapsing(T::newly_disabled(l, changes.newly_disabled.len()), |ui| {
+                    let mut sorted = changes.newly_disabled.clone();
+                    sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    for m in &sorted {
+                        ui.label(format!("  {} v{}", m.name, m.version));
+                    }
+                });
             }
 
             if !changes.newly_enabled.is_empty() {
-                ui.collapsing(
-                    format!("✅ Nově zapnuté ({})", changes.newly_enabled.len()),
-                    |ui| {
-                        let mut sorted = changes.newly_enabled.clone();
-                        sorted
-                            .sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
-                        for m in &sorted {
-                            ui.label(format!("  {} v{}", m.name, m.version));
-                        }
-                    },
-                );
+                ui.collapsing(T::newly_enabled(l, changes.newly_enabled.len()), |ui| {
+                    let mut sorted = changes.newly_enabled.clone();
+                    sorted.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+                    for m in &sorted {
+                        ui.label(format!("  {} v{}", m.name, m.version));
+                    }
+                });
             }
 
             if changes.total_changes() == 0 && has_old {
-                ui.label("Žádné změny oproti předchozímu snapshotu.");
+                ui.label(T::no_changes(l));
             }
 
             ui.add_space(8.0);
-            ui.label(format!(
-                "Beze změny: {} • Celkem změn: {}",
-                changes.unchanged.len(),
-                changes.total_changes()
-            ));
+            ui.label(T::unchanged_summary(l, changes.unchanged.len(), changes.total_changes()));
         });
     }
 
     fn show_markdown(&mut self, ui: &mut egui::Ui) {
+        let l = self.l();
+
         if self.markdown.is_empty() {
-            ui.heading("Žádný report");
-            ui.label("Nejdřív spusť skenování.");
+            ui.heading(T::no_report(l));
+            ui.label(T::run_scan_first_short(l));
             return;
         }
 
-        ui.heading("Vygenerovaný Markdown");
+        ui.heading(T::generated_markdown(l));
         ui.add_space(8.0);
 
-        if ui.button("Kopírovat do schránky").clicked() {
+        if ui.button(T::copy_to_clipboard(l)).clicked() {
             ui.ctx().copy_text(self.markdown.clone());
-            self.status = "Markdown zkopírován do schránky!".to_string();
+            self.status = T::copied(l).to_string();
         }
 
         ui.add_space(8.0);
@@ -718,11 +688,12 @@ impl App {
     }
 
     fn show_history(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Historie snapshotů");
+        let l = self.l();
+
+        ui.heading(T::history_heading(l));
         ui.add_space(8.0);
 
-        // Refresh button
-        if ui.button("Obnovit seznam").clicked() {
+        if ui.button(T::refresh(l)).clicked() {
             if let Some(dir) = self.profile_dir() {
                 self.history = find_snapshot_history(&dir);
                 self.history_selected_a = None;
@@ -732,7 +703,6 @@ impl App {
             }
         }
 
-        // Auto-load on first visit
         if self.history.is_empty() {
             if let Some(dir) = self.profile_dir() {
                 self.history = find_snapshot_history(&dir);
@@ -742,30 +712,33 @@ impl App {
         ui.add_space(8.0);
 
         if self.history.is_empty() {
-            ui.label("Žádné snapshoty nalezeny v profilu.");
-            ui.label("Spusť skenování pro vytvoření prvního snapshotu.");
+            ui.label(T::no_snapshots(l));
+            ui.label(T::run_scan_for_first(l));
             return;
         }
 
-        ui.label(format!("Nalezeno {} snapshotů:", self.history.len()));
+        ui.label(T::snapshots_found(l, self.history.len()));
         ui.add_space(4.0);
 
-        // Two-column selector
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label("Starší snapshot (A):");
+                ui.label(T::older_snapshot(l));
                 egui::ComboBox::from_id_salt("history_a")
                     .selected_text(
                         self.history_selected_a
                             .map(|i| self.history[i].filename.clone())
-                            .unwrap_or_else(|| "Vyber...".to_string()),
+                            .unwrap_or_else(|| T::select(l).to_string()),
                     )
                     .show_ui(ui, |ui| {
                         for (i, entry) in self.history.iter().enumerate() {
                             ui.selectable_value(
                                 &mut self.history_selected_a,
                                 Some(i),
-                                format!("{} ({})", entry.filename, &entry.timestamp[..10.min(entry.timestamp.len())]),
+                                format!(
+                                    "{} ({})",
+                                    entry.filename,
+                                    &entry.timestamp[..10.min(entry.timestamp.len())]
+                                ),
                             );
                         }
                     });
@@ -774,19 +747,23 @@ impl App {
             ui.add_space(16.0);
 
             ui.vertical(|ui| {
-                ui.label("Novější snapshot (B):");
+                ui.label(T::newer_snapshot(l));
                 egui::ComboBox::from_id_salt("history_b")
                     .selected_text(
                         self.history_selected_b
                             .map(|i| self.history[i].filename.clone())
-                            .unwrap_or_else(|| "Vyber...".to_string()),
+                            .unwrap_or_else(|| T::select(l).to_string()),
                     )
                     .show_ui(ui, |ui| {
                         for (i, entry) in self.history.iter().enumerate() {
                             ui.selectable_value(
                                 &mut self.history_selected_b,
                                 Some(i),
-                                format!("{} ({})", entry.filename, &entry.timestamp[..10.min(entry.timestamp.len())]),
+                                format!(
+                                    "{} ({})",
+                                    entry.filename,
+                                    &entry.timestamp[..10.min(entry.timestamp.len())]
+                                ),
                             );
                         }
                     });
@@ -800,7 +777,7 @@ impl App {
             && self.history_selected_a != self.history_selected_b;
 
         ui.add_enabled_ui(can_compare, |ui| {
-            if ui.button("Porovnat vybrané snapshoty").clicked() {
+            if ui.button(T::compare_selected(l)).clicked() {
                 self.compare_history();
             }
         });
@@ -809,33 +786,31 @@ impl App {
             && self.history_selected_b.is_some()
             && self.history_selected_a == self.history_selected_b
         {
-            ui.colored_label(
-                egui::Color32::YELLOW,
-                "Vyber dva různé snapshoty pro porovnání.",
-            );
+            ui.colored_label(egui::Color32::YELLOW, T::select_two_different(l));
         }
 
-        // Show comparison results
         if let Some(ref changes) = self.history_changes.clone() {
             ui.add_space(12.0);
             ui.separator();
             ui.add_space(8.0);
 
-            ui.heading("Porovnání historie");
+            ui.heading(T::history_comparison(l));
 
             if !self.history_markdown.is_empty() {
-                if ui.button("Kopírovat markdown do schránky").clicked() {
+                if ui.button(T::copy_history_md(l)).clicked() {
                     ui.ctx().copy_text(self.history_markdown.clone());
-                    self.status = "Markdown z historie zkopírován!".to_string();
+                    self.status = T::history_md_copied(l).to_string();
                 }
             }
 
             ui.add_space(4.0);
-            Self::show_changes_list(ui, changes, true);
+            Self::show_changes_list(ui, changes, true, l);
         }
     }
 
     fn compare_history(&mut self) {
+        let l = self.l();
+
         let idx_a = match self.history_selected_a {
             Some(i) => i,
             None => return,
@@ -855,27 +830,27 @@ impl App {
         let old = match load(idx_a) {
             Some(s) => s,
             None => {
-                self.status = format!("Chyba čtení snapshotu: {}", self.history[idx_a].filename);
+                self.status = T::snapshot_read_error(l, &self.history[idx_a].filename);
                 return;
             }
         };
         let new = match load(idx_b) {
             Some(s) => s,
             None => {
-                self.status = format!("Chyba čtení snapshotu: {}", self.history[idx_b].filename);
+                self.status = T::snapshot_read_error(l, &self.history[idx_b].filename);
                 return;
             }
         };
 
         let changes = compare_snapshots(&old, &new);
         let display = build_display_name(&self.base_name, self.edition(), &self.pack_version);
-        let md = generate_markdown(&display, &changes, &new, Some(&old));
+        let md = generate_markdown(&display, &changes, &new, Some(&old), l);
 
-        self.status = format!(
-            "Historie: {} změn ({} vs {})",
+        self.status = T::history_summary(
+            l,
             changes.total_changes(),
-            self.history[idx_a].filename,
-            self.history[idx_b].filename
+            &self.history[idx_a].filename,
+            &self.history[idx_b].filename,
         );
 
         self.history_markdown = md;

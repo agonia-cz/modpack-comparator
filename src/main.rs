@@ -14,6 +14,49 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 use std::thread;
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AppSettings {
+    lang: Lang,
+}
+
+fn app_settings_path() -> Option<PathBuf> {
+    let appdata = std::env::var_os("APPDATA")?;
+    Some(
+        PathBuf::from(appdata)
+            .join("porovnavac")
+            .join("settings.json"),
+    )
+}
+
+fn load_saved_language() -> Lang {
+    let Some(path) = app_settings_path() else {
+        return Lang::Cs;
+    };
+
+    std::fs::read_to_string(path)
+        .ok()
+        .and_then(|txt| serde_json::from_str::<AppSettings>(&txt).ok())
+        .map(|s| s.lang)
+        .unwrap_or(Lang::Cs)
+}
+
+fn save_language(lang: Lang) {
+    let Some(path) = app_settings_path() else {
+        return;
+    };
+
+    if let Some(dir) = path.parent() {
+        if std::fs::create_dir_all(dir).is_err() {
+            return;
+        }
+    }
+
+    let settings = AppSettings { lang };
+    if let Ok(json) = serde_json::to_string_pretty(&settings) {
+        let _ = std::fs::write(path, json);
+    }
+}
+
 fn load_icon() -> Option<egui::IconData> {
     let icon_bytes = include_bytes!("../app-logo.ico");
     let img = image::load_from_memory(icon_bytes).ok()?.into_rgba8();
@@ -26,6 +69,7 @@ fn load_icon() -> Option<egui::IconData> {
 }
 
 fn main() -> eframe::Result<()> {
+    let startup_lang = load_saved_language();
     let mut viewport = egui::ViewportBuilder::default()
         .with_inner_size([760.0, 680.0])
         .with_min_inner_size([500.0, 400.0]);
@@ -40,11 +84,11 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "Modpack Comparator",
+        T::window_title(startup_lang),
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::dark());
-            Ok(Box::new(App::new()))
+            Ok(Box::new(App::new(startup_lang)))
         }),
     )
 }
@@ -222,6 +266,7 @@ struct App {
     base_name: String,
     edition_index: usize,
     pack_version: String,
+    pack_version_dirty: bool,
     force_new: bool,
     profiles: Vec<ModrinthProfile>,
     selected_profile: Option<usize>,
@@ -244,7 +289,7 @@ struct App {
 const EDITIONS: [&str; 2] = ["Full", "Lite"];
 
 impl App {
-    fn new() -> Self {
+    fn new(startup_lang: Lang) -> Self {
         let profiles = detect_modrinth_profiles();
         let selected = profiles
             .iter()
@@ -252,13 +297,17 @@ impl App {
         let mods_dir = selected
             .map(|i| profiles[i].mods_path.to_string_lossy().to_string())
             .unwrap_or_default();
+        let pack_version = selected
+            .and_then(|i| read_pack_version_from_profile(&profiles[i].mods_path))
+            .unwrap_or_else(|| "26.1.0".to_string());
 
         Self {
-            lang: Lang::Cs,
+            lang: startup_lang,
             mods_dir,
             base_name: "Agonia".to_string(),
             edition_index: 0,
-            pack_version: "26.1.0".to_string(),
+            pack_version,
+            pack_version_dirty: false,
             force_new: false,
             profiles,
             selected_profile: selected,
@@ -291,6 +340,125 @@ impl App {
     fn l(&self) -> Lang {
         self.lang
     }
+
+    fn profile_config_path(&self) -> Option<PathBuf> {
+        let mods_path = PathBuf::from(&self.mods_dir);
+        let profile_dir = mods_path.parent()?;
+        Some(profile_dir.join("config").join("packbranding").join("menu.properties"))
+    }
+
+    fn has_packbranding_config(&self) -> bool {
+        self.profile_config_path().map(|p| p.exists()).unwrap_or(false)
+    }
+
+    fn load_pack_version_from_config(&mut self) {
+        let l = self.l();
+        let path = match self.profile_config_path() {
+            Some(p) => p,
+            None => {
+                self.status = T::version_config_not_found(l).to_string();
+                return;
+            }
+        };
+
+        match read_pack_version_from_menu_properties(&path) {
+            Ok(Some(version)) => {
+                self.pack_version = version.clone();
+                self.pack_version_dirty = false;
+                self.status = T::version_loaded(l, &version);
+            }
+            Ok(None) => {
+                self.status = T::version_key_missing(l).to_string();
+            }
+            Err(_) => {
+                self.status = T::version_config_not_found(l).to_string();
+            }
+        }
+    }
+
+    fn save_pack_version_to_config(&mut self) {
+        let l = self.l();
+        let path = match self.profile_config_path() {
+            Some(p) => p,
+            None => {
+                self.status = T::version_config_not_found(l).to_string();
+                return;
+            }
+        };
+
+        if !path.exists() {
+            self.status = T::version_config_not_found(l).to_string();
+            return;
+        }
+
+        match write_pack_version_to_menu_properties(&path, &self.pack_version) {
+            Ok(()) => {
+                self.pack_version_dirty = false;
+                self.status = T::version_saved(l, &self.pack_version);
+            }
+            Err(err) => {
+                if err.kind() == std::io::ErrorKind::NotFound {
+                    self.status = T::version_config_not_found(l).to_string();
+                    return;
+                }
+                self.status = T::version_save_failed(l, &err.to_string());
+            }
+        }
+    }
+}
+
+fn read_pack_version_from_profile(mods_path: &PathBuf) -> Option<String> {
+    let profile_dir = mods_path.parent()?;
+    let path = profile_dir
+        .join("config")
+        .join("packbranding")
+        .join("menu.properties");
+    read_pack_version_from_menu_properties(&path).ok().flatten()
+}
+
+fn read_pack_version_from_menu_properties(path: &PathBuf) -> std::io::Result<Option<String>> {
+    let text = std::fs::read_to_string(path)?;
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') {
+            continue;
+        }
+        if let Some(value) = trimmed.strip_prefix("packVersion=") {
+            return Ok(Some(value.trim().to_string()));
+        }
+    }
+    Ok(None)
+}
+
+fn write_pack_version_to_menu_properties(path: &PathBuf, new_version: &str) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let mut replaced = false;
+    let mut out = Vec::new();
+
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        if !replaced && !trimmed.starts_with('#') && trimmed.starts_with("packVersion=") {
+            let indent_len = line.len() - trimmed.len();
+            let indent = &line[..indent_len];
+            out.push(format!("{indent}packVersion={}", new_version.trim()));
+            replaced = true;
+        } else {
+            out.push(line.to_string());
+        }
+    }
+
+    if !replaced {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "packVersion key not found",
+        ));
+    }
+
+    let mut merged = out.join("\n");
+    if text.contains("\r\n") {
+        merged = merged.replace('\n', "\r\n");
+    }
+    std::fs::write(path, merged)
 }
 
 impl eframe::App for App {
@@ -368,6 +536,7 @@ impl App {
         ui.add_space(4.0);
 
         // Language selector
+        let old_lang = self.lang;
         ui.horizontal(|ui| {
             ui.label(T::language_label(l));
             egui::ComboBox::from_id_salt("lang_select")
@@ -377,6 +546,12 @@ impl App {
                     ui.selectable_value(&mut self.lang, Lang::En, Lang::En.label());
                 });
         });
+        if self.lang != old_lang {
+            save_language(self.lang);
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Title(
+                T::window_title(self.lang).to_string(),
+            ));
+        }
 
         ui.add_space(8.0);
 
@@ -405,6 +580,10 @@ impl App {
                             {
                                 self.mods_dir =
                                     profile.mods_path.to_string_lossy().to_string();
+                                if let Some(v) = read_pack_version_from_profile(&profile.mods_path) {
+                                    self.pack_version = v;
+                                    self.pack_version_dirty = false;
+                                }
                             }
                         }
                         if ui
@@ -453,9 +632,21 @@ impl App {
                 ui.end_row();
 
                 ui.label(T::pack_version_label(l));
-                ui.text_edit_singleline(&mut self.pack_version);
+                let version_response = ui.text_edit_singleline(&mut self.pack_version);
+                if version_response.changed() {
+                    self.pack_version_dirty = true;
+                }
                 ui.end_row();
             });
+
+        ui.horizontal(|ui| {
+            if ui.button(T::load_pack_version(l)).clicked() {
+                self.load_pack_version_from_config();
+            }
+            if ui.button(T::save_pack_version(l)).clicked() {
+                self.save_pack_version_to_config();
+            }
+        });
 
         ui.add_space(8.0);
         ui.checkbox(&mut self.force_new, T::force_new(l));
@@ -494,9 +685,17 @@ impl App {
         if !dir_exists && !self.mods_dir.is_empty() {
             ui.colored_label(egui::Color32::RED, T::dir_not_found(l));
         }
+
+        if dir_exists && !self.has_packbranding_config() {
+            ui.colored_label(egui::Color32::YELLOW, T::version_config_not_found(l));
+        }
     }
 
     fn start_scan(&mut self) {
+        if self.pack_version_dirty {
+            self.save_pack_version_to_config();
+        }
+
         let mods_path = PathBuf::from(&self.mods_dir);
         let edition = self.edition().to_string();
         let base_name = self.base_name.clone();

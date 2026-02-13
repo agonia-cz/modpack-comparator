@@ -85,6 +85,8 @@ impl T {
     pub fn pack_name_label(l: Lang) -> &'static str { get(l, "pack_name_label") }
     pub fn edition_label(l: Lang) -> &'static str { get(l, "edition_label") }
     pub fn pack_version_label(l: Lang) -> &'static str { get(l, "pack_version_label") }
+    pub fn load_pack_version(l: Lang) -> &'static str { get(l, "load_pack_version") }
+    pub fn save_pack_version(l: Lang) -> &'static str { get(l, "save_pack_version") }
     pub fn force_new(l: Lang) -> &'static str { get(l, "force_new") }
     pub fn name_preview(l: Lang) -> &'static str { get(l, "name_preview") }
     pub fn scan_button(l: Lang) -> &'static str { get(l, "scan_button") }
@@ -121,6 +123,8 @@ impl T {
     pub fn md_compared_with(l: Lang) -> &'static str { get(l, "md_compared_with") }
     pub fn md_disabled_reason(l: Lang) -> &'static str { get(l, "md_disabled_reason") }
     pub fn md_recommendation(l: Lang) -> &'static str { get(l, "md_recommendation") }
+    pub fn version_config_not_found(l: Lang) -> &'static str { get(l, "version_config_not_found") }
+    pub fn version_key_missing(l: Lang) -> &'static str { get(l, "version_key_missing") }
 
     // ── Formatted strings ───────────────────────────────────────────
     pub fn scan_done(l: Lang, active: usize, disabled: usize, failed: usize, changes: usize) -> String {
@@ -160,6 +164,15 @@ impl T {
     }
     pub fn history_summary(l: Lang, changes: usize, file_a: &str, file_b: &str) -> String {
         fmt(l, "history_summary", &[("{changes}", &changes.to_string()), ("{file_a}", file_a), ("{file_b}", file_b)])
+    }
+    pub fn version_loaded(l: Lang, version: &str) -> String {
+        fmt(l, "version_loaded", &[("{version}", version)])
+    }
+    pub fn version_saved(l: Lang, version: &str) -> String {
+        fmt(l, "version_saved", &[("{version}", version)])
+    }
+    pub fn version_save_failed(l: Lang, error: &str) -> String {
+        fmt(l, "version_save_failed", &[("{error}", error)])
     }
 
     // ── Markdown generator strings ──────────────────────────────────

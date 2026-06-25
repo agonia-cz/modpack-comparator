@@ -344,7 +344,7 @@ impl App {
     fn profile_config_path(&self) -> Option<PathBuf> {
         let mods_path = PathBuf::from(&self.mods_dir);
         let profile_dir = mods_path.parent()?;
-        Some(profile_dir.join("config").join("packbranding").join("menu.properties"))
+        Some(packbranding_config_path(profile_dir))
     }
 
     fn has_packbranding_config(&self) -> bool {
@@ -361,7 +361,7 @@ impl App {
             }
         };
 
-        match read_pack_version_from_menu_properties(&path) {
+        match read_pack_version_from_config(&path) {
             Ok(Some(version)) => {
                 self.pack_version = version.clone();
                 self.pack_version_dirty = false;
@@ -391,7 +391,7 @@ impl App {
             return;
         }
 
-        match write_pack_version_to_menu_properties(&path, &self.pack_version) {
+        match write_pack_version_to_config(&path, &self.pack_version) {
             Ok(()) => {
                 self.pack_version_dirty = false;
                 self.status = T::version_saved(l, &self.pack_version);
@@ -407,13 +407,54 @@ impl App {
     }
 }
 
+/// Resolves the PackBranding config file inside a profile's config directory.
+///
+/// Newer PackBranding versions use `config.json`; older ones used
+/// `menu.properties`. Prefer the JSON config when present, otherwise fall back
+/// to the legacy properties file (also used as the default path when neither
+/// exists yet, so callers reporting "config not found" stay accurate).
+fn packbranding_config_path(profile_dir: &std::path::Path) -> PathBuf {
+    let dir = profile_dir.join("config").join("packbranding");
+    let json = dir.join("config.json");
+    if json.exists() {
+        return json;
+    }
+    let properties = dir.join("menu.properties");
+    if properties.exists() {
+        return properties;
+    }
+    json
+}
+
+fn is_json_config(path: &std::path::Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("json"))
+        .unwrap_or(false)
+}
+
 fn read_pack_version_from_profile(mods_path: &PathBuf) -> Option<String> {
     let profile_dir = mods_path.parent()?;
-    let path = profile_dir
-        .join("config")
-        .join("packbranding")
-        .join("menu.properties");
-    read_pack_version_from_menu_properties(&path).ok().flatten()
+    let path = packbranding_config_path(profile_dir);
+    read_pack_version_from_config(&path).ok().flatten()
+}
+
+fn read_pack_version_from_config(path: &PathBuf) -> std::io::Result<Option<String>> {
+    if is_json_config(path) {
+        read_pack_version_from_json(path)
+    } else {
+        read_pack_version_from_menu_properties(path)
+    }
+}
+
+fn read_pack_version_from_json(path: &PathBuf) -> std::io::Result<Option<String>> {
+    let text = std::fs::read_to_string(path)?;
+    let value: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    Ok(value
+        .get("packVersion")
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string()))
 }
 
 fn read_pack_version_from_menu_properties(path: &PathBuf) -> std::io::Result<Option<String>> {
@@ -428,6 +469,38 @@ fn read_pack_version_from_menu_properties(path: &PathBuf) -> std::io::Result<Opt
         }
     }
     Ok(None)
+}
+
+fn write_pack_version_to_config(path: &PathBuf, new_version: &str) -> std::io::Result<()> {
+    if is_json_config(path) {
+        write_pack_version_to_json(path, new_version)
+    } else {
+        write_pack_version_to_menu_properties(path, new_version)
+    }
+}
+
+/// Updates only the `"packVersion": "..."` value in place via a line scan, so
+/// the rest of the JSON (comments in `_`-prefixed keys, key order, formatting)
+/// is preserved exactly.
+fn write_pack_version_to_json(path: &PathBuf, new_version: &str) -> std::io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let re = regex::Regex::new(r#"("packVersion"\s*:\s*")([^"]*)(")"#).unwrap();
+    if !re.is_match(&text) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "packVersion key not found",
+        ));
+    }
+    let escaped = new_version
+        .trim()
+        .replace('\\', "\\\\")
+        .replace('"', "\\\"");
+    let updated = re
+        .replace(&text, |caps: &regex::Captures| {
+            format!("{}{}{}", &caps[1], escaped, &caps[3])
+        })
+        .into_owned();
+    std::fs::write(path, updated)
 }
 
 fn write_pack_version_to_menu_properties(path: &PathBuf, new_version: &str) -> std::io::Result<()> {

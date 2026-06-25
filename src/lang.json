@@ -64,7 +64,7 @@
     "version_loaded": "Načtena verze z configu: {version}",
     "version_saved": "Uložena verze do configu: {version}",
     "version_save_failed": "Nepovedlo se uložit verzi do configu: {error}",
-    "version_config_not_found": "Mod PackBranding nebyl nalezen (chybí config/packbranding/menu.properties).",
+    "version_config_not_found": "Mod PackBranding nebyl nalezen (chybí config/packbranding/config.json).",
     "version_key_missing": "V configu chybí klíč packVersion.",
 
     "md_heading": "# 🛠️ {name} — Přehled změn\n",
@@ -149,7 +149,7 @@
     "version_loaded": "Loaded version from config: {version}",
     "version_saved": "Saved version to config: {version}",
     "version_save_failed": "Failed to save version to config: {error}",
-    "version_config_not_found": "PackBranding mod was not found (missing config/packbranding/menu.properties).",
+    "version_config_not_found": "PackBranding mod was not found (missing config/packbranding/config.json).",
     "version_key_missing": "packVersion key is missing in config.",
 
     "md_heading": "# 🛠️ {name} — Changelog\n",

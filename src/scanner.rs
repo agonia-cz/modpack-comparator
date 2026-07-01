@@ -480,3 +480,22 @@ pub fn build_file_prefix(base_name: &str, edition: &str, pack_version: &str) -> 
     };
     format!("{}-{}-{}", base, ver, ed)
 }
+
+/// File prefix that includes a timestamp, so each scan produces a unique
+/// snapshot file instead of overwriting the previous one for the same version.
+///
+/// Format: `<base>-<ver>-<edition>-<YYYYmmdd-HHMMSS>`. The leading
+/// `<base>-<ver>-<edition>` part still matches [`build_file_prefix`], which
+/// lets the history layer recover the edition slug from a filename.
+pub fn build_timestamped_prefix(base_name: &str, edition: &str, pack_version: &str) -> String {
+    let prefix = build_file_prefix(base_name, edition, pack_version);
+    let ts = chrono::Local::now().format("%Y%m%d-%H%M%S");
+    format!("{}-{}", prefix, ts)
+}
+
+/// Slugified edition tag used inside snapshot filenames (e.g. "full", "lite").
+/// Used to group history entries by edition so a scan only compares against
+/// previous snapshots of the same edition.
+pub fn edition_slug(edition: &str) -> String {
+    slugify(normalize_edition(edition))
+}

@@ -111,11 +111,11 @@ impl T {
     pub fn refresh(l: Lang) -> &'static str { get(l, "refresh") }
     pub fn no_snapshots(l: Lang) -> &'static str { get(l, "no_snapshots") }
     pub fn run_scan_for_first(l: Lang) -> &'static str { get(l, "run_scan_for_first") }
-    pub fn older_snapshot(l: Lang) -> &'static str { get(l, "older_snapshot") }
-    pub fn newer_snapshot(l: Lang) -> &'static str { get(l, "newer_snapshot") }
-    pub fn select(l: Lang) -> &'static str { get(l, "select") }
     pub fn compare_selected(l: Lang) -> &'static str { get(l, "compare_selected") }
-    pub fn select_two_different(l: Lang) -> &'static str { get(l, "select_two_different") }
+    pub fn compare_latest_two(l: Lang) -> &'static str { get(l, "compare_latest_two") }
+    pub fn history_pick_hint(l: Lang) -> &'static str { get(l, "history_pick_hint") }
+    pub fn history_active_short(l: Lang) -> &'static str { get(l, "history_active_short") }
+    pub fn delete_snapshot(l: Lang) -> &'static str { get(l, "delete_snapshot") }
     pub fn history_comparison(l: Lang) -> &'static str { get(l, "history_comparison") }
     pub fn copy_history_md(l: Lang) -> &'static str { get(l, "copy_history_md") }
     pub fn history_md_copied(l: Lang) -> &'static str { get(l, "history_md_copied") }
@@ -159,8 +159,11 @@ impl T {
     pub fn snapshots_found(l: Lang, count: usize) -> String {
         fmt(l, "snapshots_found", &[("{count}", &count.to_string())])
     }
-    pub fn snapshot_read_error(l: Lang, filename: &str) -> String {
-        fmt(l, "snapshot_read_error", &[("{filename}", filename)])
+    pub fn snapshot_deleted(l: Lang, filename: &str) -> String {
+        fmt(l, "snapshot_deleted", &[("{filename}", filename)])
+    }
+    pub fn snapshot_delete_failed(l: Lang, error: &str) -> String {
+        fmt(l, "snapshot_delete_failed", &[("{error}", error)])
     }
     pub fn history_summary(l: Lang, changes: usize, file_a: &str, file_b: &str) -> String {
         fmt(l, "history_summary", &[("{changes}", &changes.to_string()), ("{file_a}", file_a), ("{file_b}", file_b)])

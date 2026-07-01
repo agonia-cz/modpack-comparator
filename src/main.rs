@@ -6,8 +6,8 @@ mod scanner;
 use eframe::egui;
 use lang::{Lang, T};
 use scanner::{
-    build_display_name, build_file_prefix, compare_snapshots, generate_markdown,
-    scan_mods_directory, Changes, Snapshot,
+    build_display_name, build_file_prefix, build_timestamped_prefix, compare_snapshots,
+    edition_slug, generate_markdown, scan_mods_directory, Changes, Snapshot,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -207,6 +207,47 @@ struct SnapshotEntry {
     filename: String,
     timestamp: String,
     path: PathBuf,
+    /// Edition slug recovered from the filename (e.g. "full", "lite"), used to
+    /// auto-compare a scan only against snapshots of the same edition.
+    edition: Option<String>,
+    snapshot: Snapshot,
+}
+
+/// Extracts the edition slug from a snapshot filename. Names look like
+/// `<base>-<ver>-<edition>[-<timestamp>].mods_snapshot.json`. Older files have
+/// no timestamp suffix, so the edition is the last `-` segment before the
+/// extension; newer ones have the edition right before the timestamp.
+fn edition_from_filename(name: &str) -> Option<String> {
+    let stem = name.strip_suffix(".mods_snapshot.json")?;
+    let parts: Vec<&str> = stem.split('-').collect();
+    // Timestamped: ...-<edition>-<YYYYmmdd>-<HHMMSS>
+    if parts.len() >= 3 {
+        let last = parts[parts.len() - 1];
+        let prev = parts[parts.len() - 2];
+        let is_ts = prev.len() == 8
+            && prev.chars().all(|c| c.is_ascii_digit())
+            && last.len() == 6
+            && last.chars().all(|c| c.is_ascii_digit());
+        if is_ts {
+            return parts.get(parts.len() - 3).map(|s| s.to_string());
+        }
+    }
+    parts.last().map(|s| s.to_string())
+}
+
+/// Human-readable edition label for a snapshot's edition slug. Capitalizes the
+/// first letter; falls back to "?" when the edition couldn't be parsed.
+fn pretty_edition(edition: Option<&str>) -> String {
+    match edition {
+        Some(e) if !e.is_empty() => {
+            let mut chars = e.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => "?".to_string(),
+            }
+        }
+        _ => "?".to_string(),
+    }
 }
 
 fn find_snapshot_history(profile_dir: &PathBuf) -> Vec<SnapshotEntry> {
@@ -216,16 +257,19 @@ fn find_snapshot_history(profile_dir: &PathBuf) -> Vec<SnapshotEntry> {
         for entry in rd.flatten() {
             let name = entry.file_name().to_string_lossy().to_string();
             if name.ends_with(".mods_snapshot.json") {
-                let timestamp = std::fs::read_to_string(entry.path())
+                let Some(snapshot) = std::fs::read_to_string(entry.path())
                     .ok()
                     .and_then(|txt| serde_json::from_str::<Snapshot>(&txt).ok())
-                    .map(|s| s.timestamp)
-                    .unwrap_or_else(|| "?".to_string());
+                else {
+                    continue;
+                };
 
                 entries.push(SnapshotEntry {
-                    filename: name,
-                    timestamp,
+                    filename: name.clone(),
+                    timestamp: snapshot.timestamp.clone(),
                     path: entry.path(),
+                    edition: edition_from_filename(&name),
+                    snapshot,
                 });
             }
         }
@@ -233,6 +277,18 @@ fn find_snapshot_history(profile_dir: &PathBuf) -> Vec<SnapshotEntry> {
 
     entries.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
     entries
+}
+
+/// Most recent snapshot of the given edition, used as the baseline for an
+/// automatic comparison. Assumes `history` is sorted newest-first.
+fn latest_snapshot_for_edition<'a>(
+    history: &'a [SnapshotEntry],
+    edition: &str,
+) -> Option<&'a SnapshotEntry> {
+    let want = edition_slug(edition);
+    history
+        .iter()
+        .find(|e| e.edition.as_deref() == Some(want.as_str()))
 }
 
 // ──────────────────────────────────────────────────────────────────────
@@ -731,8 +787,8 @@ impl App {
         let prefix = build_file_prefix(&self.base_name, self.edition(), &self.pack_version);
         let display = build_display_name(&self.base_name, self.edition(), &self.pack_version);
         ui.label(format!("{}: {}", T::name_preview(l), display));
-        ui.label(format!("Snapshot: {}.mods_snapshot.json", prefix));
-        ui.label(format!("Changelog: {}.changelog.md", prefix));
+        ui.label(format!("Snapshot: {}-<čas>.mods_snapshot.json", prefix));
+        ui.label(format!("Changelog: {}-<čas>.changelog.md", prefix));
 
         ui.add_space(16.0);
 
@@ -776,13 +832,26 @@ impl App {
         let force_new = self.force_new;
         let lang = self.lang;
 
+        // Pick the comparison baseline (newest existing snapshot of this
+        // edition) up front, on the UI thread, so the worker just scans + diffs.
+        let baseline = if force_new {
+            None
+        } else {
+            self.profile_dir()
+                .map(|dir| find_snapshot_history(&dir))
+                .as_deref()
+                .and_then(|h| latest_snapshot_for_edition(h, &edition).map(|e| e.snapshot.clone()))
+        };
+
         let (tx, rx) = mpsc::channel();
         self.scan_rx = Some(rx);
         self.scanning = true;
         self.status = T::scanning(self.l()).to_string();
 
         thread::spawn(move || {
-            let prefix = build_file_prefix(&base_name, &edition, &pack_version);
+            // Each scan writes its own timestamped files, so previous snapshots
+            // are never overwritten and the history stays complete.
+            let prefix = build_timestamped_prefix(&base_name, &edition, &pack_version);
             let display_name = build_display_name(&base_name, &edition, &pack_version);
 
             let snapshot_dir = mods_path.parent().unwrap_or(&mods_path).to_path_buf();
@@ -791,13 +860,7 @@ impl App {
 
             let new_snapshot = scan_mods_directory(&mods_path);
 
-            let old_snapshot = if snapshot_path.exists() && !force_new {
-                std::fs::read_to_string(&snapshot_path)
-                    .ok()
-                    .and_then(|txt| serde_json::from_str::<Snapshot>(&txt).ok())
-            } else {
-                None
-            };
+            let old_snapshot = baseline;
 
             let changes = if let Some(ref old) = old_snapshot {
                 compare_snapshots(old, &new_snapshot)
@@ -965,21 +1028,23 @@ impl App {
         ui.heading(T::history_heading(l));
         ui.add_space(8.0);
 
-        if ui.button(T::refresh(l)).clicked() {
-            if let Some(dir) = self.profile_dir() {
-                self.history = find_snapshot_history(&dir);
-                self.history_selected_a = None;
-                self.history_selected_b = None;
-                self.history_changes = None;
-                self.history_markdown.clear();
-            }
-        }
-
         if self.history.is_empty() {
             if let Some(dir) = self.profile_dir() {
                 self.history = find_snapshot_history(&dir);
             }
         }
+
+        ui.horizontal(|ui| {
+            if ui.button(T::refresh(l)).clicked() {
+                self.reload_history();
+            }
+            // One-click shortcut for the common case: diff the two newest.
+            ui.add_enabled_ui(self.history.len() >= 2, |ui| {
+                if ui.button(T::compare_latest_two(l)).clicked() {
+                    self.compare_indices(1, 0);
+                }
+            });
+        });
 
         ui.add_space(8.0);
 
@@ -990,57 +1055,58 @@ impl App {
         }
 
         ui.label(T::snapshots_found(l, self.history.len()));
+        ui.label(T::history_pick_hint(l));
         ui.add_space(4.0);
 
-        ui.horizontal(|ui| {
-            ui.vertical(|ui| {
-                ui.label(T::older_snapshot(l));
-                egui::ComboBox::from_id_salt("history_a")
-                    .selected_text(
-                        self.history_selected_a
-                            .map(|i| self.history[i].filename.clone())
-                            .unwrap_or_else(|| T::select(l).to_string()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (i, entry) in self.history.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut self.history_selected_a,
-                                Some(i),
-                                format!(
-                                    "{} ({})",
-                                    entry.filename,
-                                    &entry.timestamp[..10.min(entry.timestamp.len())]
-                                ),
-                            );
+        // Click rows to mark the two snapshots to compare. A (older) / B (newer)
+        // is assigned automatically from timestamps, so order can't be wrong.
+        let mut clicked: Option<usize> = None;
+        let mut delete: Option<usize> = None;
+        let sel_a = self.history_selected_a;
+        let sel_b = self.history_selected_b;
+
+        egui::ScrollArea::vertical()
+            .max_height(220.0)
+            .show(ui, |ui| {
+                for (i, entry) in self.history.iter().enumerate() {
+                    let tag = if sel_a == Some(i) {
+                        "A "
+                    } else if sel_b == Some(i) {
+                        "B "
+                    } else {
+                        "   "
+                    };
+                    let selected = sel_a == Some(i) || sel_b == Some(i);
+                    ui.horizontal(|ui| {
+                        let date = &entry.timestamp[..16.min(entry.timestamp.len())];
+                        let label = format!(
+                            "{}[{}]  {}  ·  {} {}",
+                            tag,
+                            pretty_edition(entry.edition.as_deref()),
+                            date.replace('T', " "),
+                            entry.snapshot.stats.active,
+                            T::history_active_short(l),
+                        );
+                        if ui.selectable_label(selected, label).clicked() {
+                            clicked = Some(i);
+                        }
+                        if ui
+                            .small_button("🗑")
+                            .on_hover_text(T::delete_snapshot(l))
+                            .clicked()
+                        {
+                            delete = Some(i);
                         }
                     });
+                }
             });
 
-            ui.add_space(16.0);
-
-            ui.vertical(|ui| {
-                ui.label(T::newer_snapshot(l));
-                egui::ComboBox::from_id_salt("history_b")
-                    .selected_text(
-                        self.history_selected_b
-                            .map(|i| self.history[i].filename.clone())
-                            .unwrap_or_else(|| T::select(l).to_string()),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (i, entry) in self.history.iter().enumerate() {
-                            ui.selectable_value(
-                                &mut self.history_selected_b,
-                                Some(i),
-                                format!(
-                                    "{} ({})",
-                                    entry.filename,
-                                    &entry.timestamp[..10.min(entry.timestamp.len())]
-                                ),
-                            );
-                        }
-                    });
-            });
-        });
+        if let Some(i) = clicked {
+            self.toggle_history_selection(i);
+        }
+        if let Some(i) = delete {
+            self.delete_snapshot(i);
+        }
 
         ui.add_space(8.0);
 
@@ -1050,16 +1116,11 @@ impl App {
 
         ui.add_enabled_ui(can_compare, |ui| {
             if ui.button(T::compare_selected(l)).clicked() {
-                self.compare_history();
+                if let (Some(a), Some(b)) = (self.history_selected_a, self.history_selected_b) {
+                    self.compare_indices(a, b);
+                }
             }
         });
-
-        if self.history_selected_a.is_some()
-            && self.history_selected_b.is_some()
-            && self.history_selected_a == self.history_selected_b
-        {
-            ui.colored_label(egui::Color32::YELLOW, T::select_two_different(l));
-        }
 
         if let Some(ref changes) = self.history_changes.clone() {
             ui.add_space(12.0);
@@ -1068,11 +1129,9 @@ impl App {
 
             ui.heading(T::history_comparison(l));
 
-            if !self.history_markdown.is_empty() {
-                if ui.button(T::copy_history_md(l)).clicked() {
-                    ui.ctx().copy_text(self.history_markdown.clone());
-                    self.status = T::history_md_copied(l).to_string();
-                }
+            if !self.history_markdown.is_empty() && ui.button(T::copy_history_md(l)).clicked() {
+                ui.ctx().copy_text(self.history_markdown.clone());
+                self.status = T::history_md_copied(l).to_string();
             }
 
             ui.add_space(4.0);
@@ -1080,39 +1139,70 @@ impl App {
         }
     }
 
-    fn compare_history(&mut self) {
+    fn reload_history(&mut self) {
+        if let Some(dir) = self.profile_dir() {
+            self.history = find_snapshot_history(&dir);
+        }
+        self.history_selected_a = None;
+        self.history_selected_b = None;
+        self.history_changes = None;
+        self.history_markdown.clear();
+    }
+
+    /// Adds `i` to the comparison selection. Keeps at most two picks; the
+    /// older/newer (A/B) split is derived from indices, since `history` is
+    /// sorted newest-first (lower index = newer).
+    fn toggle_history_selection(&mut self, i: usize) {
+        if self.history_selected_a == Some(i) {
+            self.history_selected_a = None;
+            return;
+        }
+        if self.history_selected_b == Some(i) {
+            self.history_selected_b = None;
+            return;
+        }
+
+        match (self.history_selected_a, self.history_selected_b) {
+            (None, _) if self.history_selected_b != Some(i) => self.history_selected_a = Some(i),
+            (Some(_), None) => self.history_selected_b = Some(i),
+            _ => {
+                // Both taken: replace the older pick (A) and keep newest as the
+                // sliding second slot.
+                self.history_selected_a = self.history_selected_b;
+                self.history_selected_b = Some(i);
+            }
+        }
+    }
+
+    fn delete_snapshot(&mut self, i: usize) {
         let l = self.l();
-
-        let idx_a = match self.history_selected_a {
-            Some(i) => i,
+        let entry = match self.history.get(i) {
+            Some(e) => e.clone(),
             None => return,
         };
-        let idx_b = match self.history_selected_b {
-            Some(i) => i,
-            None => return,
-        };
-
-        let load = |idx: usize| -> Option<Snapshot> {
-            let path = &self.history[idx].path;
-            std::fs::read_to_string(path)
-                .ok()
-                .and_then(|txt| serde_json::from_str(&txt).ok())
-        };
-
-        let old = match load(idx_a) {
-            Some(s) => s,
-            None => {
-                self.status = T::snapshot_read_error(l, &self.history[idx_a].filename);
-                return;
+        match std::fs::remove_file(&entry.path) {
+            Ok(()) => {
+                self.status = T::snapshot_deleted(l, &entry.filename);
+                self.reload_history();
             }
-        };
-        let new = match load(idx_b) {
-            Some(s) => s,
-            None => {
-                self.status = T::snapshot_read_error(l, &self.history[idx_b].filename);
-                return;
+            Err(err) => {
+                self.status = T::snapshot_delete_failed(l, &err.to_string());
             }
-        };
+        }
+    }
+
+    /// Compares two history entries. Reorders so the older snapshot is always
+    /// the baseline, regardless of which row the user clicked first.
+    fn compare_indices(&mut self, i: usize, j: usize) {
+        let l = self.l();
+        if i >= self.history.len() || j >= self.history.len() || i == j {
+            return;
+        }
+
+        // history is newest-first, so the larger index is the older snapshot.
+        let (old_idx, new_idx) = if i > j { (i, j) } else { (j, i) };
+        let old = self.history[old_idx].snapshot.clone();
+        let new = self.history[new_idx].snapshot.clone();
 
         let changes = compare_snapshots(&old, &new);
         let display = build_display_name(&self.base_name, self.edition(), &self.pack_version);
@@ -1121,10 +1211,12 @@ impl App {
         self.status = T::history_summary(
             l,
             changes.total_changes(),
-            &self.history[idx_a].filename,
-            &self.history[idx_b].filename,
+            &self.history[old_idx].filename,
+            &self.history[new_idx].filename,
         );
 
+        self.history_selected_a = Some(old_idx);
+        self.history_selected_b = Some(new_idx);
         self.history_markdown = md;
         self.history_changes = Some(changes);
     }
